@@ -1,0 +1,183 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'alpha'
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.create_tag.outputs.tag_name }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag and increment
+        id: create_tag
+        run: |
+          # Get all numeric tags, sort them, and get the latest
+          LATEST_TAG=$(git tag -l | grep -E '^[0-9]+$' | sort -n | tail -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # No tags exist, start with 1
+            NEW_TAG=1
+          else
+            # Increment the latest tag
+            NEW_TAG=$((LATEST_TAG + 1))
+          fi
+
+          echo "Latest tag: $LATEST_TAG"
+          echo "New tag: $NEW_TAG"
+          echo "tag_name=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.create_tag.outputs.tag_name }}
+          release_name: Alpha Release ${{ steps.create_tag.outputs.tag_name }}
+          body: |
+            ## Alpha Release ${{ steps.create_tag.outputs.tag_name }}
+
+            This is an automated alpha release build.
+
+            ### Downloads
+            - **Windows**: ResourceMonitor-*-win.exe
+            - **macOS (Intel)**: ResourceMonitor-*-mac-x64.zip
+            - **macOS (Apple Silicon)**: ResourceMonitor-*-mac-arm64.zip
+            - **Linux**: ResourceMonitor-*-linux-x86_64.AppImage
+
+            ### Installation
+            - **Windows**: Download the .exe file and run directly
+            - **macOS**: Download the .zip file, extract and run the app
+            - **Linux**: Download the .AppImage file, make it executable with `chmod +x`, then run
+
+            **Note**: This is an alpha release and may contain bugs.
+          draft: false
+          prerelease: true
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            arch: x64
+          - os: macos-latest
+            platform: mac
+            arch: x64
+          - os: macos-latest
+            platform: mac
+            arch: arm64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Package application (Windows)
+        if: matrix.platform == 'win'
+        run: npm run package:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package application (macOS)
+        if: matrix.platform == 'mac'
+        run: npm run package:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Package application (Linux)
+        if: matrix.platform == 'linux'
+        run: npm run package:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find and rename artifacts (Windows)
+        if: matrix.platform == 'win'
+        shell: bash
+        run: |
+          cd release
+          FILE=$(ls ResourceMonitor*.exe | head -1)
+          NEW_NAME="ResourceMonitor-${{ needs.create-release.outputs.tag_name }}-win-${{ matrix.arch }}.exe"
+          mv "$FILE" "$NEW_NAME"
+          echo "ARTIFACT_PATH=release/$NEW_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$NEW_NAME" >> $GITHUB_ENV
+
+      - name: Find and rename artifacts (macOS)
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          cd release
+          if [ "${{ matrix.arch }}" == "arm64" ]; then
+            FILE=$(ls ResourceMonitor*-arm64*.zip | head -1)
+            NEW_NAME="ResourceMonitor-${{ needs.create-release.outputs.tag_name }}-mac-arm64.zip"
+          else
+            FILE=$(ls ResourceMonitor*-x64*.zip ResourceMonitor*-mac*.zip 2>/dev/null | grep -v arm64 | head -1)
+            NEW_NAME="ResourceMonitor-${{ needs.create-release.outputs.tag_name }}-mac-x64.zip"
+          fi
+          mv "$FILE" "$NEW_NAME"
+          echo "ARTIFACT_PATH=release/$NEW_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$NEW_NAME" >> $GITHUB_ENV
+
+      - name: Find and rename artifacts (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cd release
+          FILE=$(ls ResourceMonitor*.AppImage | head -1)
+          NEW_NAME="ResourceMonitor-${{ needs.create-release.outputs.tag_name }}-linux-x86_64.AppImage"
+          mv "$FILE" "$NEW_NAME"
+          echo "ARTIFACT_PATH=release/$NEW_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$NEW_NAME" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ env.ARTIFACT_PATH }}
+          asset_name: ${{ env.ARTIFACT_NAME }}
+          asset_content_type: application/octet-stream
+
+      - name: Upload artifact for debugging
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}-build
+          path: ${{ env.ARTIFACT_PATH }}
+          retention-days: 7
