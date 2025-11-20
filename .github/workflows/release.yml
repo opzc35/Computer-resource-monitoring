@@ -176,7 +176,7 @@ jobs:
           asset_content_type: application/octet-stream
 
       - name: Upload artifact for debugging
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-${{ matrix.arch }}-build
           path: ${{ env.ARTIFACT_PATH }}
