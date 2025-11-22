@@ -13,6 +13,9 @@ on:
           - beta
           - stable
 
+permissions:
+  contents: write
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
